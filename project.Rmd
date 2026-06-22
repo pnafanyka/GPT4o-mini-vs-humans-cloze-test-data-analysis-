@@ -201,9 +201,9 @@ jsd_scores <- map_dbl(
 summary(jsd_scores)
 ```
 
-# Distribution of Similarity Scores
+# Распределение косинусной близости
 
-## Cosine similarity
+## Косинусная близость
 
 ```{r}
 ggplot(
@@ -223,7 +223,7 @@ ggplot(
   geom_histogram(bins = 20)
 ```
 
-# Context-Level Results
+# Что на уровне контекстов?
 
 ```{r}
 results <- tibble(
@@ -235,7 +235,7 @@ results <- tibble(
 head(results)
 ```
 
-## Самые похожые контексты
+## Самые похожие контексты
 
 ```{r}
 results %>%
