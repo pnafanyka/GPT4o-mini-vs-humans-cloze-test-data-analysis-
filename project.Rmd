@@ -1,0 +1,347 @@
+---
+title: "project_pikhtin"
+output:
+  html_document: default
+  pdf_document: default
+date: "2026-06-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+---
+title: "Анализ предсказаний в cloze-task у людей и GPT4o-mini"
+author: "Андрей Пихтин"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# Введение
+
+## Исследовательский вопрос
+
+В этом исследовании я хочу узнать, повторяются ли паттерны предсказывания слов в задании cloze-task у людей и LLM. LLM в исследовании: GPT4o-mini, выбрана она, потому что это последняя open-source модель от openai на момент проведения исследоавния, к тому же она популяряна среди пользователей.
+
+Именно сравниваются распределения вероятностей частей речи для каждого контекста.
+
+## Гипотеза
+
+ЛЛМ вопроизводит поведение людей на уровне предсказания частей речи
+
+
+# Данные
+
+В исследовании используются предобработанные при помощи Python данные экспериментов, которые проводились мной в работе исследовательской группы, куда еще входили Вера Монина (бакалавриат ФиКЛ), Наталья Анатольевна Слюсарь, Сериков Олег Алексеевич, Выренкова Анастасия Сергеевна.
+
+Контесты в тесте: данные подобранные для Russian Sentence Corpus (144 предложения всего, 142 в этом исследовании) 
+
+Строка - контекст.
+Колонки - вероятности для каждой части речи, расчитанные из ответов моделей и GPT. 
+
+Данные для людей были получены в результате работы центра языка и мозга, нам их передала Алексеева Светлана Владимировна.
+
+Данные для GPT были сгенерированы мной через кастомный алгоритм семплирования, напоминающий beam_search. Для каждого контекста были взяти топ-15 ответов модели, в самих данных хранится намного больше продолжений модели.
+
+Разметка частей речи в обоих датасетах производилась при помощи библиотеки Stanza.
+
+# Setup
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(philentropy)
+library(lsa)
+library(ggplot2)
+library(corrplot)
+library(knitr)
+
+theme_set(theme_minimal())
+```
+
+# Загрузка данных
+
+
+Example:
+
+| context                     | NOUN | VERB | ADJ  |
+|-----------------------------|------|------|------|
+| Я всегда с собой беру видео | 0.80 | 0.20 | 0.00 |
+
+```{r}
+human <- read.csv("/Users/andrejpihtin/учеба/комп_мага/R/project/preprocessed_data/human_pos_probs.csv")
+gpt <- read.csv("/Users/andrejpihtin/учеба/комп_мага/R/project/preprocessed_data/gpt_pos_probs.csv")
+```
+
+## Посмотрим на данные
+
+```{r}
+dim(human)
+dim(gpt)
+
+head(human)
+head(gpt)
+```
+
+## Убедимся, что контексты совпадают для двух датафреймов
+
+```{r}
+all(human$context == gpt$context)
+```
+Проверим, что нет пустых ячеек
+```{r}
+colSums(is.na(human))
+
+colSums(is.na(gpt))
+
+```
+Переводим контексты в индексы
+```{r}
+human <- human %>%
+  column_to_rownames("context")
+
+gpt <- gpt %>%
+  column_to_rownames("context")
+```
+
+Проверяем, все ли части речи есть в обоих датафреймах
+```{r}
+list(
+  only_in_human = setdiff(names(human), names(gpt)),
+  only_in_gpt = setdiff(names(gpt), names(human))
+)
+```
+PROPN встречается только в ответах GPT, убираем его из датасета GPT.
+
+```{r}
+gpt$PROPN <- NULL
+```
+
+# Описательная статистика
+
+## Средние вероятности POS у людей и GPT
+
+```{r}
+human_mean <- human %>%
+  summarise(across(everything(), mean))
+
+gpt_mean <- gpt %>%
+  summarise(across(everything(), mean))
+```
+
+Визуализируем средние вероятности для всех частей речи у людей и у GPT
+```{r}
+mean_df <- bind_rows(
+  Human = human_mean,
+  GPT = gpt_mean,
+  .id = "Source"
+)
+
+mean_df_long <- pivot_longer(
+  mean_df,
+  cols = -Source,
+  names_to = "POS",
+  values_to = "Probability"
+)
+
+ggplot(mean_df_long,
+       aes(POS, Probability, fill = Source)) +
+  geom_col(position = "dodge")
+```
+
+Этот график говорит, что с большой вероятностью и люди, и GPT выбирают такие категории как глагол, существительное и прилагательное. Еще по нему можно прикинуть, что эти распределения очень похожи и изменяются похоже.
+
+# Анализ схожести распределений
+
+## Метрика 1 - косинусное расстрояние
+
+Для каждого контекста у нас рассчитаны вероятность выбора каждой POS. Таким образом, мы можем сравнивать контексты у людей и GPT между собой через вектора вероятностей.
+
+```{r}
+pos_cols <- names(human)
+
+cosine_scores <- map_dbl(
+  1:nrow(human),
+  ~ cosine(
+    as.numeric(human[.x, pos_cols]),
+    as.numeric(gpt[.x, pos_cols])
+  )
+)
+
+summary(cosine_scores)
+```
+
+По этим данным мы видим, что GPT в большинстве случаев очень близко воспроизводит данные людей (медианное сходство: 0.9012)
+
+```{r}
+pos_cols
+```
+
+## Метрика 2 - Дивергенция Йенсена — Шеннона
+
+Дивергенция, чем она меньше, тем ближе два веткора.
+
+```{r, message = FALSE, warning = FALSE}
+jsd_scores <- map_dbl(
+  1:nrow(human),
+  ~ JSD(
+    rbind(
+      as.numeric(human[.x, pos_cols]),
+      as.numeric(gpt[.x, pos_cols])
+    )
+  )
+)
+
+```
+
+```{r}
+summary(jsd_scores)
+```
+
+# Distribution of Similarity Scores
+
+## Cosine similarity
+
+```{r}
+ggplot(
+  data.frame(Cosine = cosine_scores),
+  aes(Cosine)
+) +
+  geom_histogram(bins = 20)
+```
+
+## Дивергенция Йенсена — Шеннона
+
+```{r}
+ggplot(
+  data.frame(JSD = jsd_scores),
+  aes(JSD)
+) +
+  geom_histogram(bins = 20)
+```
+
+# Context-Level Results
+
+```{r}
+results <- tibble(
+  context = rownames(human),
+  cosine = cosine_scores,
+  jsd = jsd_scores
+)
+
+head(results)
+```
+
+## Самые похожые контексты
+
+```{r}
+results %>%
+  arrange(desc(cosine)) %>%
+  head(10)
+```
+
+## Самые непохожие контексты
+
+```{r}
+results %>%
+  arrange(cosine) %>%
+  head(10)
+```
+## Анализ
+
+Из этих таблиц очень хорошо заметно, что в выборку входили данные с очень разными контекстами.
+Высокие показатели метрик попадаются в контекстах, которые можно назвать сильно ограничивающими, низние показатели - в слабо ограничивающих контекстах, где очень сложно предугадать следующее слово.
+
+P.S.
+Терминология выше: strongly constraining contexts vs weakly constraining contexts
+
+# Корреляция на уровне отдельных частей речи
+
+Посмотрим, как корреляции выглядят для отдельных частей речи у людей и GPT.
+
+```{r}
+correlations <- map_dfr(
+  pos_cols,
+  function(pos){
+
+    tibble(
+      POS = pos,
+      Correlation =
+        cor(
+          human[[pos]],
+          gpt[[pos]],
+          method = "spearman"
+        )
+    )
+
+  }
+)
+
+correlations
+```
+
+## Визуализируем корреляции
+
+```{r}
+ggplot(correlations,
+       aes(reorder(POS, Correlation),
+           Correlation)) +
+  geom_col(fill = "lightblue") +
+  coord_flip() +
+  labs(
+    title = "Корреляция Спирмена между вероятностями частей речи у людей и GPT",
+    x = "(POS)",
+    y = "Размер корреляции"
+  ) +
+  theme_minimal()
+```
+
+# Матрица корреляции
+
+```{r}
+human_mat <- as.matrix(human[pos_cols])
+gpt_mat <- as.matrix(gpt[pos_cols])
+
+cor_mat <- cor(human_mat, gpt_mat)
+
+corrplot(cor_mat)
+```
+В этом corrplot интересно смотреть на размер корреляции по диагонали. Но в на этом графике есть интересная деталь. Можно заметить, что между существительными и глаголами сильная обратная корреляция. То есть когда предсказывается существительное, не предсказывается глагол и наоборот.
+
+
+## Отношения между косинусной близостью и дивергенцией
+
+```{r}
+cor.test(
+  cosine_scores,
+  jsd_scores,
+  method = "spearman"
+)
+```
+При rho = -0.93 и p-value << 0.05 делаем вывод о том, что между двумя метриками есть сильная обратная связь. То есть, дивергенция падает, когда косинусная близость поднимается, что логично Это тест для самопроверки, что две метрики хорошо объясняют данные.
+
+
+
+# Результаты
+
+```{r}
+summary_table <- tibble(
+  Mean_Cosine = mean(cosine_scores),
+  SD_Cosine = sd(cosine_scores),
+  Mean_JSD = mean(jsd_scores),
+  SD_JSD = sd(jsd_scores)
+)
+
+summary_table
+```
+
+# Заключение
+
+В этом исследовании получилось установить, что модели предсказывают следующее слово похожим на людей образом.
+
+Про это говорят метрики косинусной близости: среднее значение 0.76 и дивергенции Йенсена - Шеннона: средняя дивергенция 0.25. 
+
+То есть при общей высокой схожести распределений в контекстах, метрика дивергенции показывает, что данные неоднородны и близость сильно связана с контекстом. В некоторых предсказания схожи, а в некоторых вся предсказания очень низкие, что объясняется "строгостью" контекста. 
